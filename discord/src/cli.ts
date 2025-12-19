@@ -490,23 +490,31 @@ async function run({ restart, addChannels }: CliOptions) {
     (x) => x.worktree,
   )
 
-  if (availableProjects.length === 0) {
+  if (
+    availableProjects.length === 0 &&
+    !shouldAddChannels &&
+    existingDirs.length > 0
+  ) {
     note(
       'All OpenCode projects already have Discord channels',
       'No New Projects',
     )
   }
 
-  if (
-    (!existingDirs?.length && availableProjects.length > 0) ||
-    shouldAddChannels
-  ) {
+  if (!existingDirs?.length || shouldAddChannels) {
+    const projectOptions = availableProjects.map((project) => ({
+      value: project.id,
+      label: `${path.basename(project.worktree)} (${project.worktree})`,
+    }))
+
+    projectOptions.unshift({
+      value: 'custom',
+      label: '📂 Add a custom directory from path...',
+    })
+
     const selectedProjects = await multiselect({
       message: 'Select projects to create Discord channels for:',
-      options: availableProjects.map((project) => ({
-        value: project.id,
-        label: `${path.basename(project.worktree)} (${project.worktree})`,
-      })),
+      options: projectOptions,
       required: false,
     })
 
@@ -541,30 +549,56 @@ async function run({ restart, addChannels }: CliOptions) {
         targetGuild = guilds.find((g) => g.id === guildSelection[0])!
       }
 
-      s.start('Creating Discord channels...')
+      const projectsToCreate: { directory: string }[] = []
 
       for (const projectId of selectedProjects) {
-        const project = projects.find((p) => p.id === projectId)
-        if (!project) continue
-
-        try {
-          const { textChannelId, channelName } = await createProjectChannels({
-            guild: targetGuild,
-            projectDirectory: project.worktree,
-            appId,
+        if (projectId === 'custom') {
+          const customPath = await text({
+            message: 'Enter the absolute path to the directory:',
+            validate(value) {
+              if (!value) return 'Path is required'
+              if (!path.isAbsolute(value)) return 'Path must be absolute'
+              if (!fs.existsSync(value)) return 'Directory does not exist'
+              return undefined
+            },
           })
-
-          createdChannels.push({
-            name: channelName,
-            id: textChannelId,
-            guildId: targetGuild.id,
-          })
-        } catch (error) {
-          cliLogger.error(`Failed to create channels for ${path.basename(project.worktree)}:`, error)
+          if (!isCancel(customPath)) {
+            projectsToCreate.push({ directory: customPath })
+          }
+        } else {
+          const project = projects.find((p) => p.id === projectId)
+          if (project) {
+            projectsToCreate.push({ directory: project.worktree })
+          }
         }
       }
 
-      s.stop(`Created ${createdChannels.length} channel(s)`)
+      if (projectsToCreate.length > 0) {
+        s.start('Creating Discord channels...')
+
+        for (const { directory } of projectsToCreate) {
+          try {
+            const { textChannelId, channelName } = await createProjectChannels({
+              guild: targetGuild,
+              projectDirectory: directory,
+              appId,
+            })
+
+            createdChannels.push({
+              name: channelName,
+              id: textChannelId,
+              guildId: targetGuild.id,
+            })
+          } catch (error) {
+            cliLogger.error(
+              `Failed to create channels for ${path.basename(directory)}:`,
+              error,
+            )
+          }
+        }
+
+        s.stop(`Created ${createdChannels.length} channel(s)`)
+      }
 
       if (createdChannels.length > 0) {
         note(
